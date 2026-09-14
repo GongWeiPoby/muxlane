@@ -3,7 +3,7 @@
 //! （替代原 250Hz 轮询泵：空闲时每秒 250 次唤醒 + 锁竞争）。
 use bytes::Bytes;
 use muxlane_core::model::AgentId;
-use muxlane_core::protocol::{EventMsg, TermDataEvent, TermResyncEvent};
+use muxlane_core::protocol::{EventMsg, TermDataEvent, TermReplayChunkEvent, TermResyncEvent};
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Weak};
@@ -39,6 +39,8 @@ impl SubRegistry {
         sink: mpsc::Sender<EventMsg>,
         rx: broadcast::Receiver<Bytes>,
         session: Arc<muxlane_term::PtySession>,
+        replay: Bytes,
+        replay_chunks: bool,
     ) {
         let ending = Arc::new(AtomicBool::new(false));
         let wake = Arc::new(Notify::new());
@@ -48,6 +50,8 @@ impl SubRegistry {
             session,
             sink,
             rx,
+            replay,
+            replay_chunks,
             Arc::clone(&ending),
             Arc::clone(&wake),
             self.me.clone(),
@@ -105,11 +109,18 @@ async fn forward(
     session: Arc<muxlane_term::PtySession>,
     sink: mpsc::Sender<EventMsg>,
     mut rx: broadcast::Receiver<Bytes>,
+    replay: Bytes,
+    replay_chunks: bool,
     ending: Arc<AtomicBool>,
     wake: Arc<Notify>,
     registry: Option<Weak<Mutex<SubRegistry>>>,
 ) {
     let mut last_resync: Option<Instant> = None;
+    let mut replay_id = 0u64;
+    if replay_chunks && !send_replay_chunks(&sink, &agent, &sub_id, replay_id, &replay).await {
+        cleanup(&sub_id, registry).await;
+        return;
+    }
     loop {
         if ending.load(Ordering::Relaxed) {
             // 等 sink 可写再发 term.exit（await 容量，等同原泵的重试语义），然后结束。
@@ -156,15 +167,21 @@ async fn forward(
                     // 队列满/Lagged 不是可忽略条件：以完整 replay resync 重建无损边界。
                     let (snapshot, new_rx) = session.subscribe();
                     rx = new_rx;
-                    let msg = EventMsg::new(
-                        muxlane_core::protocol::events::TERM_RESYNC,
-                        serde_json::to_value(TermResyncEvent {
-                            agent: agent.clone(),
-                            replay_b64: muxlane_core::protocol::b64_encode(&snapshot),
-                        })
-                        .unwrap_or_default(),
-                    );
-                    if sink.send(msg).await.is_err() {
+                    replay_id = replay_id.wrapping_add(1);
+                    let sent = if replay_chunks {
+                        send_replay_chunks(&sink, &agent, &sub_id, replay_id, &snapshot).await
+                    } else {
+                        let msg = EventMsg::new(
+                            muxlane_core::protocol::events::TERM_RESYNC,
+                            serde_json::to_value(TermResyncEvent {
+                                agent: agent.clone(),
+                                replay_b64: muxlane_core::protocol::b64_encode(&snapshot),
+                            })
+                            .unwrap_or_default(),
+                        );
+                        sink.send(msg).await.is_ok()
+                    };
+                    if !sent {
                         break;
                     }
                     last_resync = Some(Instant::now());
@@ -173,9 +190,57 @@ async fn forward(
             }
         }
     }
+    cleanup(&sub_id, registry).await;
+}
+
+async fn send_replay_chunks(
+    sink: &mpsc::Sender<EventMsg>,
+    agent: &AgentId,
+    sub_id: &str,
+    replay_id: u64,
+    replay: &[u8],
+) -> bool {
+    // An empty replay still gets a start marker so the client resets stale output.
+    if replay.is_empty() {
+        return send_replay_chunk(sink, agent, sub_id, replay_id, 0, &[]).await;
+    }
+    for (chunk_index, chunk) in replay
+        .chunks(muxlane_core::protocol::TERM_REPLAY_CHUNK_SIZE)
+        .enumerate()
+    {
+        if !send_replay_chunk(sink, agent, sub_id, replay_id, chunk_index as u32, chunk).await {
+            return false;
+        }
+    }
+    true
+}
+
+async fn send_replay_chunk(
+    sink: &mpsc::Sender<EventMsg>,
+    agent: &AgentId,
+    sub_id: &str,
+    replay_id: u64,
+    chunk_index: u32,
+    chunk: &[u8],
+) -> bool {
+    let msg = EventMsg::new(
+        muxlane_core::protocol::events::TERM_REPLAY_CHUNK,
+        serde_json::to_value(TermReplayChunkEvent {
+            agent: agent.clone(),
+            sub_id: sub_id.to_string(),
+            replay_id,
+            chunk_index,
+            data_b64: muxlane_core::protocol::b64_encode(chunk),
+        })
+        .unwrap_or_default(),
+    );
+    sink.send(msg).await.is_ok()
+}
+
+async fn cleanup(sub_id: &str, registry: Option<Weak<Mutex<SubRegistry>>>) {
     // 自行摘除条目（remove()/remove_agent() 先行移除时为 no-op）。
     if let Some(registry) = registry.and_then(|weak| weak.upgrade()) {
-        registry.lock().await.remove(&sub_id);
+        registry.lock().await.remove(sub_id);
     }
 }
 
@@ -210,16 +275,48 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn chunked_replay_stays_within_frame_limit_and_preserves_bytes() {
+        let replay = Bytes::from(vec![
+            0x5a;
+            muxlane_core::protocol::TERM_REPLAY_CHUNK_SIZE * 2 + 17
+        ]);
+        let (sink, mut sink_rx) = mpsc::channel(16);
+        assert!(
+            send_replay_chunks(&sink, &"chunked".into(), "sub1", 7, &replay).await,
+            "chunk delivery"
+        );
+
+        let mut received = Vec::new();
+        let mut indices = Vec::new();
+        while let Ok(message) = sink_rx.try_recv() {
+            assert!(
+                serde_json::to_vec(&message).unwrap().len() <= muxlane_core::protocol::MAX_FRAME,
+                "replay chunk exceeds wire frame limit"
+            );
+            let event: TermReplayChunkEvent = serde_json::from_value(message.params).unwrap();
+            indices.push(event.chunk_index);
+            received.extend(muxlane_core::protocol::b64_decode(&event.data_b64).unwrap());
+        }
+        assert_eq!(indices, vec![0, 1, 2]);
+        assert_eq!(received, replay);
+    }
+
+    #[tokio::test]
     async fn forwarder_delivers_all_frames_in_order() {
         let agent = "shell_burst".to_string();
         let session = spawn_session(&agent, "sleep 2");
         let (tap_tx, rx) = broadcast::channel(128);
         let (sink, mut sink_rx) = mpsc::channel(256);
         let registry = bound_registry();
-        registry
-            .lock()
-            .await
-            .add("burst", &agent, sink, rx, Arc::clone(&session));
+        registry.lock().await.add(
+            "burst",
+            &agent,
+            sink,
+            rx,
+            Arc::clone(&session),
+            Bytes::new(),
+            false,
+        );
 
         for byte in 0..64u32 {
             tap_tx.send(Bytes::from(vec![byte as u8])).unwrap();
@@ -249,10 +346,15 @@ mod tests {
         tx.try_send(EventMsg::new("dummy", serde_json::json!({})))
             .unwrap();
         let registry = bound_registry();
-        registry
-            .lock()
-            .await
-            .add("s1", &agent, tx, rx, Arc::clone(&session));
+        registry.lock().await.add(
+            "s1",
+            &agent,
+            tx,
+            rx,
+            Arc::clone(&session),
+            Bytes::new(),
+            false,
+        );
 
         // 等 replay 包含 RESYNC-MARK，然后灌 20 条（容量 8 → 必 Lagged）。
         tokio::time::sleep(Duration::from_millis(250)).await;
@@ -299,10 +401,15 @@ mod tests {
         let (tap_tx, rx) = broadcast::channel(8);
         let (tx, mut sink_rx) = mpsc::channel(8);
         let registry = bound_registry();
-        registry
-            .lock()
-            .await
-            .add("dl", &agent, tx, rx, Arc::clone(&session));
+        registry.lock().await.add(
+            "dl",
+            &agent,
+            tx,
+            rx,
+            Arc::clone(&session),
+            Bytes::new(),
+            false,
+        );
 
         // Lagged #1：本地 tap 溢出（sink 容量 8，不读 → 转发阻住 → tap 溢出）。
         tokio::time::sleep(Duration::from_millis(300)).await;
@@ -356,10 +463,15 @@ mod tests {
         let (_, rx) = session.subscribe();
         let (tx, mut sink_rx) = mpsc::channel(2);
         let registry = bound_registry();
-        registry
-            .lock()
-            .await
-            .add("ending", &agent, tx, rx, Arc::clone(&session));
+        registry.lock().await.add(
+            "ending",
+            &agent,
+            tx,
+            rx,
+            Arc::clone(&session),
+            Bytes::new(),
+            false,
+        );
 
         registry.lock().await.mark_agent_exit(&agent);
 

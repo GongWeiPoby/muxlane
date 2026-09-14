@@ -191,6 +191,8 @@ pub enum Frame {
 pub enum TermUpdate {
     /// 首帧或 lag/backpressure 后重同步；消费者必须 reset 后重放。
     Resync(Vec<u8>),
+    /// A continuation of a chunked replay; append without resetting the terminal.
+    ResyncChunk(Vec<u8>),
     Data(Vec<u8>),
 }
 
@@ -211,19 +213,53 @@ pub async fn stream_term(
             muxlane_core::protocol::methods::TERM_SUBSCRIBE,
             serde_json::to_value(TermSubscribeParams {
                 agent: agent.clone(),
+                accept_replay_chunks: true,
             })?,
         )
         .await?,
     )?;
-    on_update(TermUpdate::Resync(b64_decode(&result.replay_b64)?));
+    // Old servers ignore accept_replay_chunks and return the legacy single frame.
+    if !result.replay_b64.is_empty() {
+        on_update(TermUpdate::Resync(b64_decode(&result.replay_b64)?));
+    }
     let sub_id = result.sub_id;
     let (mut writer, mut reader) = conn.into_split();
+    let mut active_replay_id = None;
+    let mut next_chunk = 0u32;
     let outcome = loop {
         match reader.next().await? {
             Frame::Event(ev) if ev.event == muxlane_core::protocol::events::TERM_DATA => {
                 let d: muxlane_core::protocol::TermDataEvent = serde_json::from_value(ev.params)?;
                 if d.agent == *agent {
                     on_update(TermUpdate::Data(b64_decode(&d.data_b64)?));
+                }
+            }
+            Frame::Event(ev) if ev.event == muxlane_core::protocol::events::TERM_REPLAY_CHUNK => {
+                let d: muxlane_core::protocol::TermReplayChunkEvent =
+                    serde_json::from_value(ev.params)?;
+                if d.agent == *agent && d.sub_id == sub_id {
+                    let bytes = b64_decode(&d.data_b64)?;
+                    if active_replay_id != Some(d.replay_id) {
+                        if d.chunk_index != 0 {
+                            break Err(anyhow::anyhow!(
+                                "replay chunk sequence started at {}",
+                                d.chunk_index
+                            ));
+                        }
+                        active_replay_id = Some(d.replay_id);
+                        next_chunk = 1;
+                        on_update(TermUpdate::Resync(bytes));
+                    } else {
+                        if d.chunk_index != next_chunk {
+                            break Err(anyhow::anyhow!(
+                                "replay chunk sequence gap: expected {}, got {}",
+                                next_chunk,
+                                d.chunk_index
+                            ));
+                        }
+                        next_chunk = next_chunk.wrapping_add(1);
+                        on_update(TermUpdate::ResyncChunk(bytes));
+                    }
                 }
             }
             Frame::Event(ev) if ev.event == muxlane_core::protocol::events::TERM_RESYNC => {

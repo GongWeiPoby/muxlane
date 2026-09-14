@@ -203,6 +203,7 @@ impl MuxlaneServer {
                     muxlane_core::protocol::features::AGENT_SPAWN.into(),
                     muxlane_core::protocol::features::TERM_INPUT.into(),
                     muxlane_core::protocol::features::TERM_RESIZE.into(),
+                    muxlane_core::protocol::features::TERM_REPLAY_CHUNKS.into(),
                     muxlane_core::protocol::features::AGENT_MARK_SEEN.into(),
                 ],
             })?,
@@ -246,29 +247,36 @@ impl MuxlaneServer {
             let session = self.sessions.lock().await.get(&params.agent).cloned();
             session.map(|session| {
                 let (snapshot, rx) = session.subscribe();
-                (
-                    muxlane_core::model::new_id("sub"),
-                    muxlane_core::protocol::b64_encode(&snapshot),
-                    rx,
-                    session,
-                )
+                (muxlane_core::model::new_id("sub"), snapshot, rx, session)
             })
         };
-        let Some((sub_id, replay_b64, rx, session)) = prepared else {
+        let Some((sub_id, snapshot, rx, session)) = prepared else {
             return Ok(Response::err(
                 req.id,
                 "no_such_agent",
                 format!("agent {} not running", params.agent),
             ));
         };
-        self.subs
-            .lock()
-            .await
-            .add(&sub_id, &params.agent, ev_tx.clone(), rx, session);
+        self.subs.lock().await.add(
+            &sub_id,
+            &params.agent,
+            ev_tx.clone(),
+            rx,
+            session,
+            snapshot.clone(),
+            params.accept_replay_chunks,
+        );
         connection_subs.push(sub_id.clone());
         Ok(Response::ok(
             req.id,
-            serde_json::to_value(TermSubscribeResult { sub_id, replay_b64 })?,
+            serde_json::to_value(TermSubscribeResult {
+                sub_id,
+                replay_b64: if params.accept_replay_chunks {
+                    String::new()
+                } else {
+                    muxlane_core::protocol::b64_encode(&snapshot)
+                },
+            })?,
         ))
     }
 

@@ -142,6 +142,68 @@ async fn refresh_snapshot_publishes_the_fetched_list() {
 }
 
 #[tokio::test]
+async fn stream_term_handles_chunked_replay_in_order() {
+    let dir = tempfile::tempdir().unwrap();
+    let sock = dir.path().join("chunked.sock");
+    let listener = UnixListener::bind(&sock).unwrap();
+    let server = tokio::spawn(async move {
+        let (stream, _) = listener.accept().await.unwrap();
+        let (r, mut w) = stream.into_split();
+        let mut r = tokio::io::BufReader::new(r);
+        let req: Request = serde_json::from_value(read_frame(&mut r).await.unwrap()).unwrap();
+        assert_eq!(req.params["accept_replay_chunks"], true);
+        write_frame(
+            &mut w,
+            &Response::ok(req.id, serde_json::json!({"sub_id":"s1","replay_b64":""})),
+        )
+        .await
+        .unwrap();
+        for (index, data) in [b"FIRST-".as_slice(), b"SECOND".as_slice()]
+            .into_iter()
+            .enumerate()
+        {
+            write_frame(
+                &mut w,
+                &EventMsg::new(
+                    muxlane_core::protocol::events::TERM_REPLAY_CHUNK,
+                    serde_json::json!({
+                        "agent":"a1",
+                        "sub_id":"s1",
+                        "replay_id":0,
+                        "chunk_index":index,
+                        "data_b64":b64_encode(data),
+                    }),
+                ),
+            )
+            .await
+            .unwrap();
+        }
+        write_frame(
+            &mut w,
+            &EventMsg::new(
+                muxlane_core::protocol::events::TERM_EXIT,
+                serde_json::json!({"agent":"a1"}),
+            ),
+        )
+        .await
+        .unwrap();
+    });
+
+    let updates = Arc::new(Mutex::new(Vec::new()));
+    let out = Arc::clone(&updates);
+    stream_term(sock.to_str().unwrap(), &"a1".into(), move |update| {
+        out.lock().unwrap().push(update);
+    })
+    .await
+    .unwrap();
+    server.await.unwrap();
+
+    let updates = updates.lock().unwrap();
+    assert!(matches!(&updates[0], TermUpdate::Resync(bytes) if bytes == b"FIRST-"));
+    assert!(matches!(&updates[1], TermUpdate::ResyncChunk(bytes) if bytes == b"SECOND"));
+}
+
+#[tokio::test]
 async fn stream_term_handles_replay_resync_and_exit() {
     let dir = tempfile::tempdir().unwrap();
     let sock = dir.path().join("fake.sock");

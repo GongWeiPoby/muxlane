@@ -6,6 +6,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 pub const MAX_FRAME: usize = 1024 * 1024; // 1 MiB
+/// Raw PTY bytes per replay event. Base64 and JSON overhead remain below MAX_FRAME.
+pub const TERM_REPLAY_CHUNK_SIZE: usize = 256 * 1024;
 pub const PROTOCOL_VERSION: u32 = 2;
 
 /// base64 编解码快捷方式（wire 协议用）
@@ -188,6 +190,7 @@ pub mod events {
     pub const AGENT_STATUS: &str = "agent.status_changed";
     pub const TERM_DATA: &str = "term.data";
     pub const TERM_RESYNC: &str = "term.resync";
+    pub const TERM_REPLAY_CHUNK: &str = "term.replay_chunk";
     pub const TERM_EXIT: &str = "term.exit";
 }
 
@@ -202,6 +205,8 @@ pub mod features {
     /// 与本地终端同一语义，不依赖客户端会话内存。旧版本远端不会广播此特性，
     /// 客户端应在调用前先检查 supports()。
     pub const AGENT_MARK_SEEN: &str = "agent.mark_seen";
+    /// Client asks the server to stream large terminal replays as bounded events.
+    pub const TERM_REPLAY_CHUNKS: &str = "term.replay_chunks";
 }
 /// 方法名常量
 pub mod methods {
@@ -233,6 +238,9 @@ pub struct HelloResult {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TermSubscribeParams {
     pub agent: AgentId,
+    /// New clients opt in; old clients keep the single-frame response behavior.
+    #[serde(default)]
+    pub accept_replay_chunks: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -266,6 +274,16 @@ pub struct TermDataEvent {
 pub struct TermResyncEvent {
     pub agent: AgentId,
     pub replay_b64: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TermReplayChunkEvent {
+    pub agent: AgentId,
+    pub sub_id: String,
+    /// Increments for each replay/resync. Chunk zero starts a fresh terminal image.
+    pub replay_id: u64,
+    pub chunk_index: u32,
+    pub data_b64: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -1475,13 +1475,17 @@ impl Render for TermView {
                                     .runs
                                     .iter()
                                     .map(|run| {
-                                        let fg = if run.style.fg == 0x2a2e38ff {
-                                            term_theme.fg0
-                                        } else if run.style.dim {
-                                            dim_u32(run.style.fg)
+                                        let bg = if run.style.bg == muxlane_term::DEFAULT_COLOR {
+                                            term_theme.bg0
+                                        } else {
+                                            run.style.bg
+                                        };
+                                        let fg = if run.style.fg == muxlane_term::DEFAULT_COLOR {
+                                            default_terminal_fg(term_theme, bg)
                                         } else {
                                             run.style.fg
                                         };
+                                        let fg = if run.style.dim { dim_u32(fg) } else { fg };
                                         let font = Font {
                                             weight: if run.style.bold {
                                                 FontWeight::BOLD
@@ -1533,7 +1537,7 @@ impl Render for TermView {
                                     start_col: run.start_col,
                                     row,
                                     cells: run.cells,
-                                    bg: rgba(if run.style.bg == 0xffffffff {
+                                    bg: rgba(if run.style.bg == muxlane_term::DEFAULT_COLOR {
                                         term_theme.bg0
                                     } else {
                                         run.style.bg
@@ -1858,6 +1862,33 @@ impl Render for TermView {
     }
 }
 
+fn default_terminal_fg(theme: Theme, background: u32) -> u32 {
+    let theme_fg = contrast_ratio(theme.fg0, background);
+    let white = contrast_ratio(0xffffffff, background);
+    if white > theme_fg {
+        0xffffffff
+    } else {
+        theme.fg0
+    }
+}
+
+fn contrast_ratio(foreground: u32, background: u32) -> f64 {
+    let luminance = |color: u32| {
+        let channel = |shift: u32| {
+            let value = f64::from((color >> shift) & 0xff) / 255.0;
+            if value <= 0.04045 {
+                value / 12.92
+            } else {
+                ((value + 0.055) / 1.055).powf(2.4)
+            }
+        };
+        0.2126 * channel(24) + 0.7152 * channel(16) + 0.0722 * channel(8)
+    };
+    let foreground = luminance(foreground);
+    let background = luminance(background);
+    (foreground.max(background) + 0.05) / (foreground.min(background) + 0.05)
+}
+
 fn dim_u32(c: u32) -> u32 {
     let r = ((c >> 24) & 0xff) as f32 * 0.66;
     let g = ((c >> 16) & 0xff) as f32 * 0.66;
@@ -1878,6 +1909,13 @@ mod tests {
         fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
             div().size_full().p(self.inset).children(self.term.clone())
         }
+    }
+
+    #[test]
+    fn default_terminal_text_switches_to_light_on_dark_backgrounds() {
+        let theme = Theme::for_mode(crate::theme::ThemeMode::Paper);
+        assert_eq!(default_terminal_fg(theme, 0x20312aff), 0xffffffff);
+        assert_eq!(default_terminal_fg(theme, theme.bg0), theme.fg0);
     }
 
     #[test]

@@ -282,6 +282,7 @@ impl MuxlaneApp {
                 self.server.rt_spawn(async move {
                     enum RemoteTermUpdate {
                         Resync(Vec<u8>),
+                        ResyncChunk(Vec<u8>),
                         Data(Vec<u8>),
                     }
                     let mut backoff = 250u64;
@@ -316,6 +317,10 @@ impl MuxlaneApp {
                                                 // 历史回放，里面的终端查询早已回答过，不能再答一次。
                                                 vterm.feed_silent(&bytes);
                                             }
+                                            RemoteTermUpdate::ResyncChunk(bytes) => {
+                                                // Chunked replay continues without resetting the terminal.
+                                                vterm.feed_silent(&bytes);
+                                            }
                                             RemoteTermUpdate::Data(bytes) => vterm.feed(&bytes),
                                         }
                                     }
@@ -329,6 +334,9 @@ impl MuxlaneApp {
                             let update = match update {
                                 muxlane_client::TermUpdate::Resync(bytes) => {
                                     RemoteTermUpdate::Resync(bytes)
+                                }
+                                muxlane_client::TermUpdate::ResyncChunk(bytes) => {
+                                    RemoteTermUpdate::ResyncChunk(bytes)
                                 }
                                 muxlane_client::TermUpdate::Data(bytes) => {
                                     RemoteTermUpdate::Data(bytes)

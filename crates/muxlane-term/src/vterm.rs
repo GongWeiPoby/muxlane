@@ -8,6 +8,9 @@ use alacritty_terminal::term::{Term, TermDamage, TermMode};
 use alacritty_terminal::vte::ansi::{Color, NamedColor, Processor, Rgb};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
+
+/// Sentinel for terminal defaults; opaque terminal colors cannot collide with it.
+pub const DEFAULT_COLOR: u32 = 0x00000000;
 use tokio::sync::mpsc;
 
 use crate::kitty_graphics::{KittyGraphicsScanner, StoredImage};
@@ -667,8 +670,8 @@ fn build_row(term: &Term<ClipboardBridge>, visual: usize, fallback_id: Option<u3
     let grid = term.grid();
     let columns = grid.columns();
     let buffer_line = visual as i32 - grid.display_offset() as i32;
-    let default_fg = 0x2a2e38ff;
-    let default_bg = 0xffffffff;
+    let default_fg = DEFAULT_COLOR;
+    let default_bg = DEFAULT_COLOR;
     // 选区范围与 cell 无关：每行只解析一次，不再逐 cell 调 to_range。
     let selection_range = term
         .selection
