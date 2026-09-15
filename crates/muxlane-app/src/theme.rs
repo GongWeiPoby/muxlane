@@ -8,6 +8,7 @@ use serde::{Deserialize, Serialize};
 pub enum ThemeMode {
     #[default]
     Light,
+    Moonstone,
     Paper,
     Sky,
     Jade,
@@ -18,8 +19,9 @@ pub enum ThemeMode {
 }
 
 impl ThemeMode {
-    pub const ALL: [Self; 8] = [
+    pub const ALL: [Self; 9] = [
         Self::Light,
+        Self::Moonstone,
         Self::Paper,
         Self::Sky,
         Self::Jade,
@@ -32,6 +34,7 @@ impl ThemeMode {
     pub fn id(self) -> &'static str {
         match self {
             Self::Light => "light",
+            Self::Moonstone => "moonstone",
             Self::Paper => "paper",
             Self::Sky => "sky",
             Self::Jade => "jade",
@@ -51,6 +54,7 @@ impl ThemeMode {
             language,
             match self {
                 Self::Light => "theme.light",
+                Self::Moonstone => "theme.moonstone",
                 Self::Paper => "theme.paper",
                 Self::Sky => "theme.sky",
                 Self::Jade => "theme.jade",
@@ -127,6 +131,23 @@ impl Theme {
                 green: 0x529633ff,
                 yellow: 0xb88226ff,
                 red: 0xd13e50ff,
+            },
+            // Pearl-white canvas, mist-violet surfaces and a restrained iris accent.
+            ThemeMode::Moonstone => Self {
+                bg0: 0xfaf9fcff,
+                bg1: 0xf0eef5ff,
+                bg2: 0xe6e3eeff,
+                bg3: 0xdad6e5ff,
+                line: 0xcec9dcff,
+                fg0: 0x292633ff,
+                fg1: 0x504b60ff,
+                fg2: 0x605b6eff,
+                accent: 0x6650a4ff,
+                on_accent: 0xffffffff,
+                on_warning: 0xffffffff,
+                green: 0x2d6950ff,
+                yellow: 0x875b14ff,
+                red: 0xac3850ff,
             },
             ThemeMode::Paper => Self {
                 bg0: 0xf4ecdfff,
@@ -257,6 +278,21 @@ mod tests {
     }
 
     #[test]
+    fn moonstone_is_registered_localized_and_persistable() {
+        let mode = ThemeMode::Moonstone;
+        assert!(ThemeMode::ALL.contains(&mode));
+        assert_eq!(ThemeMode::from_id("moonstone"), Some(mode));
+        assert!(!mode.is_dark());
+        assert_eq!(mode.label(Language::Chinese), "月白");
+        assert_eq!(mode.label(Language::English), "Moonstone");
+        assert_eq!(serde_json::to_string(&mode).unwrap(), "\"moonstone\"");
+        assert_eq!(
+            serde_json::from_str::<ThemeMode>("\"moonstone\"").unwrap(),
+            mode
+        );
+    }
+
+    #[test]
     fn dark_theme_ids_are_marked_dark() {
         assert!(ThemeMode::Dark.is_dark());
         assert!(ThemeMode::Synthwave.is_dark());
@@ -298,6 +334,29 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn moonstone_text_and_controls_meet_aa() {
+        let theme = Theme::for_mode(ThemeMode::Moonstone);
+        for background in [theme.bg0, theme.bg1, theme.bg2, theme.bg3] {
+            for foreground in [theme.fg0, theme.fg1, theme.fg2, theme.accent] {
+                assert!(
+                    contrast_ratio(foreground, background) >= 4.5,
+                    "{foreground:#x} on {background:#x}"
+                );
+            }
+        }
+        for background in [theme.bg0, theme.bg1] {
+            for foreground in [theme.green, theme.yellow, theme.red] {
+                assert!(contrast_ratio(foreground, background) >= 4.5);
+            }
+        }
+        assert!(contrast_ratio(theme.on_accent, theme.accent) >= 4.5);
+        assert!(contrast_ratio(theme.on_warning, theme.yellow) >= 4.5);
+        assert!(srgb_luminance(theme.bg0) > srgb_luminance(theme.bg1));
+        assert!(srgb_luminance(theme.bg1) > srgb_luminance(theme.bg2));
+        assert!(srgb_luminance(theme.bg2) > srgb_luminance(theme.bg3));
     }
 
     #[test]

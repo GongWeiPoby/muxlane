@@ -542,6 +542,7 @@ const TRANSLATIONS: &[(&str, &str, &str)] = &[
     ("theme.dark", "墨渊", "Ink"),
     ("theme.jade", "竹青", "Jade"),
     ("theme.light", "雾白瓷", "Porcelain"),
+    ("theme.moonstone", "月白", "Moonstone"),
     ("theme.one_dark", "代码墨", "One Dark"),
     ("theme.paper", "纸暖", "Paper Warm"),
     ("theme.sakura", "樱粉", "Sakura"),
