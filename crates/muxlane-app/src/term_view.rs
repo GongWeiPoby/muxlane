@@ -1563,7 +1563,15 @@ impl Render for TermView {
                             line_height,
                             base_half,
                             runs,
-                            visible_cursor: snapshot.cursor.as_ref().map(cursor_bounds),
+                            visible_cursor: snapshot
+                                .cursor
+                                .as_ref()
+                                .map(cursor_bounds)
+                                .or_else(|| {
+                                    (focused && snapshot.cursor.is_none())
+                                        .then(|| snapshot.logical_cursor.as_ref().map(cursor_bounds))
+                                        .flatten()
+                                }),
                             logical_cursor: snapshot.logical_cursor.as_ref().map(cursor_bounds),
                         }
                     },
@@ -1648,11 +1656,14 @@ impl Render for TermView {
                                         cx,
                                     );
                                 }
-                                if let Some(cursor) = state.visible_cursor {
+                                if let Some(mut cursor) = state.visible_cursor {
                                     let mut color = rgba(term_theme.cursor());
                                     if !focused {
                                         color.a = 0.35;
                                     }
+                                    // Pi toggles SHOW_CURSOR between input and working states.
+                                    // Keep the caret shape stable instead of alternating block/line.
+                                    cursor.size.width = ui_px(1.5);
                                     window.paint_quad(fill(cursor, color));
                                 }
                             },
@@ -1864,9 +1875,9 @@ impl Render for TermView {
 
 fn default_terminal_fg(theme: Theme, background: u32) -> u32 {
     let theme_fg = contrast_ratio(theme.fg0, background);
-    let white = contrast_ratio(0xffffffff, background);
-    if white > theme_fg {
-        0xffffffff
+    let theme_surface = contrast_ratio(theme.bg0, background);
+    if theme_surface > theme_fg {
+        theme.bg0
     } else {
         theme.fg0
     }
@@ -1914,7 +1925,7 @@ mod tests {
     #[test]
     fn default_terminal_text_switches_to_light_on_dark_backgrounds() {
         let theme = Theme::for_mode(crate::theme::ThemeMode::Paper);
-        assert_eq!(default_terminal_fg(theme, 0x20312aff), 0xffffffff);
+        assert_eq!(default_terminal_fg(theme, 0x20312aff), theme.bg0);
         assert_eq!(default_terminal_fg(theme, theme.bg0), theme.fg0);
     }
 
