@@ -3,6 +3,7 @@
 /artifacts
 *.log
 .DS_Store
+.idea
 .jet
 .jez
 .pi
@@ -10,3 +11,4 @@
 example
 prototype.html
 .omo
+/scripts/demo-instance.sh
