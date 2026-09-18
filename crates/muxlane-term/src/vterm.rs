@@ -320,11 +320,12 @@ impl VTerm {
                 kitty,
                 ..
             } = &mut *guard;
+            let images_before = kitty.image_count();
             // Kitty 图片 APC 序列（ESC _G...ESC \）vte 0.13 不认识，会被直接吸掉；
             // 先拦下来自己解析，剩下的字节再交给 alacritty 正常处理。
             let filtered = kitty.process(data);
             parser.advance(term, &filtered);
-            let damage = match term.damage() {
+            let mut damage = match term.damage() {
                 TermDamage::Full => ContentDamage::Full,
                 TermDamage::Partial(lines) => {
                     let rows: Vec<usize> = lines.map(|d| d.line).collect();
@@ -336,11 +337,21 @@ impl VTerm {
                 }
             };
             term.reset_damage();
+            // 图片字节不进网格；解码完成后仍要整帧重画，否则占位符还在、图还没出来。
+            if kitty.image_count() != images_before {
+                damage = ContentDamage::Full;
+            }
             guard.damage = merge_damage(
                 std::mem::replace(&mut guard.damage, ContentDamage::None),
                 damage,
             );
         }
+    }
+
+    /// PTY 字节可能只是查询应答或未完成的图片分片，网格没变时调用方不必 notify。
+    pub fn has_pending_damage(&self) -> bool {
+        self.lock_inner()
+            .is_some_and(|guard| !matches!(guard.damage, ContentDamage::None))
     }
 
     /// 纯文本（检测/测试用）；UI 应使用 render_snapshot 保留颜色/光标。
@@ -1006,6 +1017,17 @@ mod alt_screen_tests {
         let vterm2 = VTerm::new(80, 24);
         vterm2.feed(b"\x1b[31mred\x1b[0m");
         assert!(vterm2.line_text(0).unwrap().contains("red"));
+    }
+
+    #[test]
+    fn snapshot_clears_pending_damage_until_new_output() {
+        let vterm = VTerm::new(80, 24);
+        let _ = vterm.render_snapshot();
+        assert!(!vterm.has_pending_damage());
+        vterm.feed(b"ok");
+        assert!(vterm.has_pending_damage());
+        let _ = vterm.render_snapshot();
+        assert!(!vterm.has_pending_damage());
     }
 }
 

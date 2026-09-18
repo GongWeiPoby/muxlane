@@ -159,6 +159,10 @@ impl KittyGraphicsScanner {
         out
     }
 
+    pub fn image_count(&self) -> usize {
+        self.images.len()
+    }
+
     /// 取出一张已完整解码的图片（便宜克隆，每帧渲染都会调）。
     pub fn image(&self, id: u32) -> Option<Arc<StoredImage>> {
         self.images.get(&id).cloned()

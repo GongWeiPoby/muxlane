@@ -309,7 +309,7 @@ impl MuxlaneApp {
                                     }
                                 }
                                 let vterm = vterm3.clone();
-                                tokio::task::spawn_blocking(move || {
+                                let changed = tokio::task::spawn_blocking(move || {
                                     for update in batch {
                                         match update {
                                             RemoteTermUpdate::Resync(bytes) => {
@@ -324,10 +324,13 @@ impl MuxlaneApp {
                                             RemoteTermUpdate::Data(bytes) => vterm.feed(&bytes),
                                         }
                                     }
+                                    vterm.has_pending_damage()
                                 })
                                 .await
-                                .ok();
-                                let _ = notify.try_send(());
+                                .unwrap_or(true);
+                                if changed {
+                                    let _ = notify.try_send(());
+                                }
                             }
                         });
                         let result = muxlane_client::stream_term(&sock, &agent2, move |update| {

@@ -632,11 +632,7 @@ impl TermView {
                 let window = if session_for_task.interaction_recent() {
                     std::time::Duration::from_millis(4)
                 } else if session_for_task.is_focused() {
-                    if saturated_streak >= 4 {
-                        std::time::Duration::from_millis(33)
-                    } else {
-                        std::time::Duration::from_millis(16)
-                    }
+                    std::time::Duration::from_millis(33)
                 } else {
                     std::time::Duration::from_millis(100)
                 };
@@ -692,6 +688,9 @@ impl TermView {
                     })
                     .await;
                 last_feed = std::time::Instant::now();
+                if !vterm_for_task.has_pending_damage() {
+                    continue;
+                }
                 let stop = view.update(cx, move |_view, cx| cx.notify()).is_err();
                 if stop {
                     break;
